@@ -1,0 +1,13 @@
+{
+  "//": "Lets tsx resolve the openclaw workspace package without a pnpm install, so the golden-vector generator runs against the real TypeScript source from a clean checkout.",
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "target": "es2022",
+    "allowImportingTsExtensions": true,
+    "baseUrl": ".",
+    "paths": {
+      "@openclaw/normalization-core": ["../../openclaw/packages/normalization-core/dist/index.mjs"]
+    }
+  }
+}
