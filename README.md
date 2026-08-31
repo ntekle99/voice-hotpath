@@ -297,26 +297,6 @@ measurable here and costs I-cache footprint, which does show up in the tail.
 `-march=native` is opt-in (`-DVHP_NATIVE_ARCH=ON`) because a binary built with it
 SIGILLs on an older host.
 
-## Honest limits
-
-- **p99.9 on 1500 samples is ~1.5 samples deep.** The histogram summary prints a
-  warning saying so whenever n < 1000. Treat every p99.9 above as indicative;
-  a real characterisation wants tens of thousands of frames, which is minutes of
-  audio per configuration.
-- **Cores are pinned but not isolated.** Timer ticks and co-tenants are in every
-  tail number here.
-- **The corpus is synthetic.** Deterministic noise shaped into utterances, not
-  recorded speech. It is the right tool for A/B-ing pipeline changes (identical
-  input, so the difference *is* the change) and the wrong tool for tuning
-  absolute thresholds against real voices.
-- **Capacity is measured against a synchronised burst.** Real calls do not all
-  deliver a frame at the same instant. The 1024 figure is therefore conservative
-  for smooth traffic and correct for the worst case; it is a burst-absorption
-  limit, not a throughput limit.
-- **This is one stage of the pipeline.** It does not touch ASR, the LLM, or TTS,
-  which is where the end-to-end seconds actually live. What it does is make that
-  claim measurable instead of assumed.
-
 ## Running it
 
 Shared memory, both processes C++:
