@@ -3,11 +3,6 @@
 A C++20 audio hot path for the OpenClaw Mattermost voice agent, and the
 measurement harness that justifies it.
 
-The TypeScript pipeline works: WebRTC audio in, VAD chunking, NVIDIA Parakeet
-ASR, LLM, Magpie TTS back out. What it did not have was a way to say where the
-time goes, or a hot path insulated from the runtime's garbage collector. This is
-both: the frame-ingest → ring → VAD → chunk-assembly stage rewritten in C++, and
-the instrumentation to prove what that buys and what it costs.
 
 ## What is here
 
