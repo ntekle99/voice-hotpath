@@ -3,6 +3,27 @@
 A C++20 audio hot path for the OpenClaw Mattermost voice agent, and the
 measurement harness that justifies it.
 
+## What it is, in plain terms
+
+A real-time voice agent has to turn a microphone stream into speech chunks the
+instant someone stops talking. The original path ran inside Node.js, where
+garbage-collection pauses made the occasional chunk arrive late enough to clip
+speech. This project rewrites that path in C++ and, just as importantly, builds
+the measurement harness that proves the rewrite was worth it and shows where the
+real latency actually hides.
+
+The headline results, all on a single CPU core:
+
+- Worst-case (p99.9) timing jitter dropped from 18.4 ms to 1.8 ms.
+- One core handles 1024 simultaneous calls with zero dropped audio.
+- The harness surfaced a one-line config default costing 140 ms on every
+  utterance, a bigger latency win than the C++ rewrite itself.
+
+What it demonstrates: lock-free concurrency, shared-memory IPC, careful
+tail-latency measurement (p99.9, coordinated-omission correction, Little's Law),
+and byte-exact parity testing between the C++ and TypeScript implementations.
+
+The rest of this README is the detailed engineering write-up behind those numbers.
 
 ## What is here
 
@@ -44,7 +65,7 @@ ctest --test-dir build --output-on-failure
 ```
 
 Ten tests: five plain, two under ThreadSanitizer, three under
-AddressSanitizer+UBSan. The TSan pass is the one that matters for the ring —
+AddressSanitizer+UBSan. The TSan pass is the one that matters for the ring.
 x86-64's memory model will happily execute an incorrectly-ordered acquire/release
 pair without complaint, and the bug only shows up on weakly-ordered hardware.
 TSan models the C++ abstract machine instead of the CPU, so it catches what the
@@ -62,10 +83,10 @@ ingest ──▶ SPSC ring ──▶ pinned VAD thread ──────▶ eve
 
 One thread serves every concurrent call. Frames from all sessions arrive
 interleaved on a single ring and are demultiplexed by `session_id` through an
-open-addressed table. Every session's chunk assembler — including its assembled
--audio buffer — is preallocated at startup, because a call connecting mid-flight
-must not allocate on the pinned thread; that allocation would land in the tail of
-every *other* call in progress.
+open-addressed table. Every session's chunk assembler, including its
+assembled-audio buffer, is preallocated at startup, because a call connecting
+mid-flight must not allocate on the pinned thread; that allocation would land in
+the tail of every *other* call in progress.
 
 The pinned thread does no allocation, no locking, no I/O and no logging. Every
 syscall in the process happens on the ingest or publisher thread. That is the
@@ -75,14 +96,14 @@ whole discipline; the numbers below follow from it.
 
 An N-API addon was the obvious first design and it is the wrong one. It runs
 inside the Node process, so a V8 GC pause still stalls the thread handing frames
-to the C++ code — the jitter you set out to remove is still there, you have only
-moved where it is measured. A separate process with shared memory between them
-isolates the hot path completely, and is structurally the same thing as a
+to the C++ code, and the jitter you set out to remove is still there; you have
+only moved where it is measured. A separate process with shared memory between
+them isolates the hot path completely, and is structurally the same thing as a
 market-data feed handler.
 
 The unix-socket path exists so the current TypeScript gateway can feed the hot
 path today, without a native addon or a rebuilt runtime. It costs a copy and a
-syscall per frame. Measured, not assumed — see the transport line below.
+syscall per frame. Measured, not assumed; see the transport line below.
 
 ## Measurements
 
@@ -94,8 +115,8 @@ are the point.
 ### Ring handoff, padded vs false-shared
 
 400k items, producer paced to 500 kHz so the ring stays at depth 0 (p50 depth is
-0 items — verified, not assumed; a saturated ring measures queueing delay, not
-handoff cost, and reporting that as handoff latency is off by three orders of
+0 items, verified rather than assumed; a saturated ring measures queueing delay,
+not handoff cost, and reporting that as handoff latency is off by three orders of
 magnitude):
 
 | | p50 | p99 | p99.9 |
@@ -120,7 +141,7 @@ coordinated-omission corrected:
 
 Again: **p50 barely tells you anything is wrong.** The GC tail is a p99+ effect,
 and it scales with the retained live set (p99.9 lateness of 6.7 ms at 32 MB,
-12.6 ms at 128 MB, 17.9 ms at 384 MB). Churning `Buffer`s does almost nothing —
+12.6 ms at 128 MB, 17.9 ms at 384 MB). Churning `Buffer`s does almost nothing:
 they are off-heap and the collector barely tracks them. Retained *object graphs*
 are what cost, because that is what a major GC has to trace.
 
@@ -133,21 +154,21 @@ are what cost, because that is what a major GC has to trace.
 | endpoint decision lag | 240.0 ms | 240.0 ms | 240.1 ms |
 
 The transport and the VAD are together under 30 µs at p99.9. The endpoint lag is
-240 ms and it is **not a defect** — it is exactly `silence_frames × frame_ms` =
+240 ms and it is **not a defect**: it is exactly `silence_frames × frame_ms` =
 12 × 20 ms, the hangover, working as configured. This is the number worth
 arguing about, and it is four orders of magnitude larger than everything else on
 this path. Which is the real lesson: the C++ rewrite bought ~16 ms at p99.9 of
 jitter, and the *configuration* of the gate is worth 240 ms on every single
 utterance.
 
-Over the UDS bridge the transport line goes from 1 µs to 92 µs at p50 — ~90×,
+Over the UDS bridge the transport line goes from 1 µs to 92 µs at p50, about 90×,
 and still two orders of magnitude below the hangover. The bridge is not the
 thing to optimise.
 
 ### Concurrent-call capacity
 
 Each session contributes 50 frames/second. The producer emits one frame per
-session per 20 ms tick, so all N frames land back-to-back — a worst-case
+session per 20 ms tick, so all N frames land back-to-back, a worst-case
 synchronised arrival burst. Real calls arrive independently and spread across the
 interval, so this understates capacity deliberately; a number that only holds
 when traffic is smooth is not a capacity number. Full output in
@@ -162,15 +183,15 @@ when traffic is smooth is not a capacity number. Full output in
 | 4096 | 1,638,400 | 21,067 (1.29%) | 4.02 µs | 928 | 17.450 | 17.760 |
 
 **1024 concurrent calls on one pinned core with zero frame loss and zero event
-loss.** Beyond that the bounded ingest ring sheds under the burst — visibly and
+loss.** Beyond that the bounded ingest ring sheds under the burst, visibly and
 counted, which is the entire reason for bounding it.
 
 Two things worth reading off this table:
 
 *Service time improves under load* (2.17 µs at N=1, 1.01 µs at N=4096). That is
 cache and branch-predictor warmth: at one call the loop is cold between frames.
-It also means the binding constraint is **burst absorption**, not throughput —
-at 1.0 µs/frame one core could sustain far more than 1024 calls if arrivals were
+It also means the binding constraint is **burst absorption**, not throughput: at
+1.0 µs/frame one core could sustain far more than 1024 calls if arrivals were
 smooth. The 1024 ceiling is the 1024-slot ring meeting a 1024-frame instantaneous
 burst.
 
@@ -180,14 +201,14 @@ sound rather than a coincidence.
 
 Getting that check to pass took two corrections, both worth recording:
 
-1. **Depth was sampled at each pop.** That is a *departure*-average — the queue
+1. **Depth was sampled at each pop.** That is a *departure*-average: the queue
    is deepest exactly when frames are leaving, so departures preferentially
    sample busy periods. It read 21.7 against a predicted 2.46. The fix is to
    integrate depth over time, reusing the timestamp the loop already takes.
    Both are still reported: `depth_p99` answers "how deep does it get",
    `L` answers "how much work is resident on average".
 2. **λ was derived from offered load.** The consumer outlived the producer by
-   3 s, and that idle tail dilutes a time-average but not a predicted value —
+   3 s, and that idle tail dilutes a time-average but not a predicted value, so
    the two disagreed by exactly the ratio of the windows (11/8 ≈ 1.4). λ is now
    computed from the consumer's own observation window.
 
@@ -195,8 +216,8 @@ Getting that check to pass took two corrections, both worth recording:
 
 `tools/sweep_hangover.sh` sweeps the hangover against a deterministic corpus with
 known utterance boundaries (5 utterances, 1500 ms of speech each, 80 ms
-inter-word pauses) and reports `chunks_per_utterance` — 1.00 means no false cuts
-— against `endpoint_p50_ms`, which is what every utterance pays. Full output in
+inter-word pauses) and reports `chunks_per_utterance` (1.00 means no false cuts)
+against `endpoint_p50_ms`, which is what every utterance pays. Full output in
 `results/sweep_hangover.csv`:
 
 | hangover | chunks/utterance | endpoint p50 |
@@ -209,7 +230,7 @@ inter-word pauses) and reports `chunks_per_utterance` — 1.00 means no false cu
 | 240 ms (current default) | 1.00 | 240.0 ms |
 | 500 ms | 1.00 | 500.0 ms |
 
-The frontier is a step, not a slope, and the knee is at 100 ms — one frame past
+The frontier is a step, not a slope, and the knee is at 100 ms, one frame past
 the 80 ms inter-word pause, which is the sanity check on the whole measurement
 chain: the corpus, the gate port and the metric all agree on where the cliff
 should be. Below it every utterance shatters into five fragments; at and above it
@@ -217,7 +238,7 @@ nothing is cut and the only thing more hangover buys is latency.
 
 Against this corpus the shipped 240 ms default is paying **140 ms per utterance
 for nothing**. That is a bigger number than the entire C++ rewrite bought back.
-The caveat is that 80 ms is a synthetic pause length — real speakers have a
+The caveat is that 80 ms is a synthetic pause length: real speakers have a
 distribution of them, with a tail, and the right operating point sits far enough
 up that tail to be safe. That is the argument to have, and now there is a curve
 to have it against. Choose the point and state the cost ratio you are assuming:
@@ -227,7 +248,7 @@ to have it against. Choose the point and state the cost ratio you are assuming:
 ## Parity with the TypeScript
 
 `test_vad_parity` is the load-bearing test. `tools/gen_vad_reference.mjs` imports
-the **real** `src/talk/audio-energy.ts` — not a reimplementation — runs a
+the **real** `src/talk/audio-energy.ts` (not a reimplementation), runs a
 deterministic 600-frame corpus through it, and writes the per-frame energies and
 gate decisions to `test/vad_reference.json`. The C++ test regenerates
 bit-identical audio (same xorshift64\*, same float pipeline) and asserts every
@@ -249,7 +270,7 @@ gate config valid for both formats.
 ## Design notes
 
 **Overflow policy is drop-newest, not drop-oldest.** Drop-oldest is more
-attractive for audio — stale frames have less value than fresh ones — but in a
+attractive for audio (stale frames have less value than fresh ones), but in a
 strict SPSC ring it requires the producer to advance the consumer's index, which
 breaks the single-writer invariant the whole lock-free argument rests on. Doing
 it properly needs per-slot sequence numbers and consumer-side overwrite detection
@@ -259,7 +280,7 @@ ring means the consumer is wedged, not that we hit a burst.
 
 **The ring does not count drops.** It returns `kFull`; the caller decides what
 that means. A caller that sheds counts a dropped frame, a caller that spins
-counts nothing. Folding a counter into the ring conflates the two — a retrying
+counts nothing. Folding a counter into the ring conflates the two: a retrying
 producer inflates it once per spin iteration. (This was a real bug here: the
 cross-process test reported 338,329 "drops" for a run that lost zero frames.)
 
@@ -269,16 +290,16 @@ reported. The same reasoning governs session admission: when the table is full,
 new calls are refused and counted, rather than degrading every call in progress
 to serve one more.
 
-**Deletion writes tombstones, not empty slots.** The session table is open
--addressed with linear probing, and clearing a slot on release truncates the
-probe chain of any id that hashes earlier and collides there — the next lookup
+**Deletion writes tombstones, not empty slots.** The session table is
+open-addressed with linear probing, and clearing a slot on release truncates the
+probe chain of any id that hashes earlier and collides there: the next lookup
 for that id stops short, reports "not found", and opens a *second* session for a
 call that already had one. Downstream that reads as an ASR stream that suddenly
 forgot the conversation. Binding sessions permanently to slots also fixes the
 chain but strands capacity, so session storage is a separate free list.
 
 **The event ring is sized for the burst, not the average.** Chunk events are rare
-per call but arrive in waves — staggered calls still endpoint together. At 512
+per call but arrive in waves: staggered calls still endpoint together. At 512
 concurrent calls a 256-slot event ring dropped events while the publisher was
 mid-write; 4096 slots and flushing only on drain fixed it, and moved the clean
 capacity ceiling from 512 to 1024 calls.
